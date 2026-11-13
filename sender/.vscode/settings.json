@@ -32,6 +32,6 @@
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=/Users/bagsuhyeon/DEV/esp32-wifi/csi-sensing/build"
+    "--compile-commands-dir=/Users/bagsuhyeon/DEV/csi-sensing/sender/build"
   ]
 }
