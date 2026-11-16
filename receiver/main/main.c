@@ -11,7 +11,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 
-#define CSI_CHANNEL 11           // sender와 반드시 같게
+#define CSI_CHANNEL 11           // sender와 같게
 // sender 로그에 찍힌 MAC으로 바꿔 넣기
 static const uint8_t SENDER_MAC[6] = {0x20, 0x9b, 0xa9, 0x92, 0xf4, 0x3c};
 static const char *TAG = "recv";

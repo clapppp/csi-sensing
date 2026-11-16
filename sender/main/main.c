@@ -13,11 +13,10 @@
 
 /* ===== 설정값 ===== */
 #define CSI_CHANNEL   11         // 사용할 WiFi 채널. receiver도 같은 값이어야 패킷을 받음
-#define SEND_HZ       100        // 1초에 보낼 패킷 수 (= CSI 샘플링 주파수)
+#define SEND_HZ       50        // 1초에 보낼 패킷 수 (= CSI 샘플링 주파수)
 
 static const char *TAG = "sender";   // 로그 앞에 붙는 태그 문자열
-static const uint8_t BCAST[ESP_NOW_ETH_ALEN] =   // ESP_NOW_ETH_ALEN = 6 (MAC 길이)
-    {0xff,0xff,0xff,0xff,0xff,0xff};             // 브로드캐스트 주소: 모든 기기가 수신 대상
+static const uint8_t BCAST[6] = {0xff,0xff,0xff,0xff,0xff,0xff}; // 브로드캐스트 주소: 모든 기기가 수신 대상
 
 /* ===== WiFi 초기화 ===== */
 static void wifi_init(void)
@@ -45,7 +44,7 @@ static void espnow_init(void)
         .ifidx   = WIFI_IF_STA,                     // 어느 인터페이스로 보낼지 (STA)
         .encrypt = false,                           // 암호화 안 함 (브로드캐스트는 암호화 불가)
     };
-    memcpy(peer.peer_addr, BCAST, ESP_NOW_ETH_ALEN); // peer 주소 칸에 브로드캐스트 MAC 6바이트 복사
+    memcpy(peer.peer_addr, BCAST, 6); // peer 주소 칸에 브로드캐스트 MAC 6바이트 복사
     ESP_ERROR_CHECK(esp_now_add_peer(&peer));       // peer 목록에 등록. 등록 안 된 주소로는 send가 실패함
     esp_now_rate_config_t rate = {
         .phymode = WIFI_PHY_MODE_HT20,     // 11n, 20MHz → 프리앰블에 L-LTF + HT-LTF가 들어감
