@@ -9,17 +9,19 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "nvs_flash.h"
 
 #define CSI_CHANNEL 11           // sender와 같게
 // sender 로그에 찍힌 MAC으로 바꿔 넣기
-static const uint8_t SENDER_MAC[6] = {0x20, 0x9b, 0xa9, 0x92, 0xf4, 0x3c};
+static const uint8_t SENDER_MAC[6] = {0xc8, 0x85, 0x41, 0xe2, 0x98, 0xf0};
 static const char *TAG = "recv";
 
 /* 콜백에서 출력 태스크로 넘길 데이터 한 건 */
 typedef struct {
     uint32_t ts;                 // 수신 시각 (부팅 후 마이크로초)
     int8_t   rssi;               // 수신 신호 세기 (dBm)
+    uint8_t  fwi;                // first_word_invalid: 1이면 CSI 첫 4바이트가 하드웨어 한계로 무효
     uint16_t len;                // CSI 바이트 수
     int8_t   buf[384];           // CSI 원본 (ESP32 최대 길이보다 넉넉하게)
 } csi_pkt_t;
@@ -37,6 +39,7 @@ static void csi_cb(void *ctx, wifi_csi_info_t *info)
     csi_pkt_t p;
     p.ts   = info->rx_ctrl.timestamp;
     p.rssi = info->rx_ctrl.rssi;
+    p.fwi  = info->first_word_invalid;
     p.len  = info->len > sizeof(p.buf) ? sizeof(p.buf) : info->len;
     memcpy(p.buf, info->buf, p.len);
     xQueueSend(csi_q, &p, 0);    // 큐가 꽉 차면 기다리지 않고 버림 (드라이버를 막지 않게)
@@ -59,8 +62,8 @@ static void print_task(void *arg)
     csi_pkt_t p;
     while (1) {
         if (xQueueReceive(csi_q, &p, portMAX_DELAY)) {   // 데이터 올 때까지 대기
-            printf("CSI,%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%d,%u,[",
-                   last_seq, lost, p.ts, p.rssi, p.len);
+            printf("CSI,%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%d,%u,%u,[",
+                   last_seq, lost, p.ts, p.rssi, p.fwi, p.len);
             for (int i = 0; i < p.len; i++) printf("%d ", p.buf[i]);
             printf("]\n");
         }
@@ -107,6 +110,7 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
 
     csi_q = xQueueCreate(32, sizeof(csi_pkt_t));          // 최대 32건 버퍼링
+    if (!csi_q) { ESP_LOGE(TAG, "queue alloc failed"); abort(); }  // 메모리 부족하면 바로 알 수 있게
     xTaskCreate(print_task, "print", 4096, NULL, 5, NULL); // 스택 4KB, 우선순위 5
 
     wifi_init();
@@ -114,6 +118,6 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_recv_cb)); // 수신은 peer 등록 없이 가능
     csi_init();
 
-    ESP_LOGI(TAG, "receiver ready, ch %d", CSI_CHANNEL);
+    ESP_LOGI(TAG, "receiver ready, ch %d, free heap %u", CSI_CHANNEL, (unsigned)esp_get_free_heap_size());
     // app_main은 여기서 return해도 됨. 콜백과 print_task가 계속 동작함
 }
