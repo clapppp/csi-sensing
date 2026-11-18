@@ -47,7 +47,8 @@ READER=""
 echo "[csi_log] 받은 원본 $(wc -c < "$RAW" | tr -d ' ') bytes, CSV 변환 중" >&2
 
 # 2) 변환: 원본 파일을 한 번에 읽어서 CSV로
-awk -v out="$OUT" '
+# LC_ALL=C: 포트 열 때 들어오는 깨진 바이트(한글 로케일에서 awk가 에러 냄)를 그냥 바이트로 취급
+LC_ALL=C awk -v out="$OUT" '
     BEGIN {
         print "seq,lost,ts_us,rssi,first_word_invalid,len,csi" > out
     }
