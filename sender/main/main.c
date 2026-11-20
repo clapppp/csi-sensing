@@ -1,3 +1,12 @@
+/*
+플래시디스크의 nvs영역을 처음에 초기화
+이유는 자잘한 설정값이 변경될때 페이지 관리를 용이하게
+그리고 wifi init 으로 무선통신부를 켜고 물리적인 설정들
+espnow로 어떤 프로토콜을 쓸건지 설정
+main 에서 송신시작
+*/
+
+
 /* ===== 헤더: 쓸 함수/타입 선언을 가져옴 ===== */
 #include <stdio.h>               // printf 등 표준 입출력
 #include <string.h>              // memcpy 등 메모리 함수
@@ -22,7 +31,7 @@ static const uint8_t BCAST[6] = {0xff,0xff,0xff,0xff,0xff,0xff}; // 브로드캐
 static void wifi_init(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());              // TCP/IP 스택(lwIP) 초기화
-    ESP_ERROR_CHECK(esp_event_loop_create_default()); // 기본 이벤트 루프 생성. WiFi 드라이버가 상태 변화를 여기로 알림
+    ESP_ERROR_CHECK(esp_event_loop_create_default()); // 기본 이벤트 루프 생성. WiFi 드라이버가 상태 변화를 여기로 알림, 이프로젝트에서는 아무도 안읽음
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT(); // WiFi 드라이버 기본 설정값(버퍼 개수 등)을 담은 구조체
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));           // 그 설정으로 드라이버 초기화 (메모리 할당, 내부 태스크 생성)
@@ -58,11 +67,11 @@ static void espnow_init(void)
 /* ===== 진입점 ===== */
 void app_main(void)
 {
-    esp_err_t ret = nvs_flash_init();               // NVS 초기화. WiFi 드라이버가 RF 보정값을 여기 저장함
+    esp_err_t ret = nvs_flash_init();               // NVS 마운트. WiFi 드라이버가 RF 보정값을 여기 저장함
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||         // NVS 공간이 꽉 찼거나
         ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {     // 이전 펌웨어가 다른 NVS 포맷으로 써 놨으면
         ESP_ERROR_CHECK(nvs_flash_erase());         // NVS 영역을 지우고
-        ret = nvs_flash_init();                     // 다시 초기화
+        ret = nvs_flash_init();                     // 다시 초기화 - 즉 웬만하면 기존꺼 씀
     }
     ESP_ERROR_CHECK(ret);                           // 그래도 실패면 여기서 멈춤
 

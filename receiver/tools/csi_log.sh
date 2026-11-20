@@ -1,158 +1,68 @@
 #!/bin/sh
-# receiver ESP32 시리얼을 정해진 시간(기본 10초) 동안 받아서 CSI만 CSV로 저장하고 자동 종료.
-#
-# 받는 동안에는 cat이 시리얼 원본을 임시 파일에 그대로 쓰기만 하고, 끝난 뒤에 한 번에 CSV로 변환함.
-# (읽으면서 변환하면 변환이 밀릴 때 cat도 같이 멈춰서 시리얼 데이터가 버려지기 때문)
-#
-# 사용법:
-#   ./csi_log.sh /dev/cu.usbserial-XXXX        # 10초 저장
-#   ./csi_log.sh /dev/cu.usbserial-XXXX 30     # 30초 저장
-#   BAUD=115200 ./csi_log.sh ...               # 보드레이트 변경 (기본 921600)
-#   DELAY=10 ./csi_log.sh ...                  # 시작 전 대기 시간 변경 (기본 3초, 자세 잡거나 나갈 시간)
-#   LABEL=1 ./csi_log.sh ...                   # 호흡 정답 레이블 같이 기록 (아래 설명)
-# 파일은 항상 tools 폴더에 csi_<날짜_시각>.csv 로 저장됨. 중간에 Ctrl+C 하면 그때까지 받은 것만 변환함.
-#
-# CSV 컬럼: seq,lost,ts_us,rssi,first_word_invalid,len,csi   (csi = int8 값들을 공백으로 구분한 한 칸)
-# 포트 찾기: ls /dev/cu.*   (리눅스는 ls /dev/ttyUSB*)
-# idf.py monitor 가 같은 포트를 열고 있으면 안 됨.
-#
-# 호흡 레이블 (LABEL=1):
-#   측정하는 동안 이 터미널에서  ← 를 누르고 있으면 들숨,  → 를 누르고 있으면 날숨,  아무것도 안 누르면 무호흡.
-#   키를 누르고 있으면 키 반복 입력이 계속 들어오는 걸로 "누르는 중"을 판단함 (터미널은 키 떼는 순간을 못 받음).
-#   CSV 맨 뒤에 host_time(PC 시각, 초), label(in / ex / none) 컬럼이 추가됨. 파일은 CSV 하나만 생김.
+# ./csi_log.sh /dev/cu.usbserial-XXXX 30     30초 측정 (기본 10초), tools/csi_<날짜_시각>.csv 에 받는 즉시 씀
+# LABEL=1 ./csi_log.sh ...                    ← 누르고 있기 = 들숨(in), → = 날숨(ex), 안 누르기 = 무호흡(none)
+# BAUD=921600 DELAY=3 GAP=0.7                 보드레이트, 시작 전 대기(초), 같은 키 입력이 GAP초 넘게 끊기면 뗀 걸로 봄
 
-PORT="$1"
-DUR="${2:-10}"
-# 어디서 실행하든 이 스크립트가 있는 tools 폴더에 저장
-BASE="$(cd "$(dirname "$0")" && pwd)/csi_$(date +%Y%m%d_%H%M%S)"
-OUT="$BASE.csv"
-BAUD="${BAUD:-921600}"
-DELAY="${DELAY:-3}"                 # 실행 후 측정 시작까지 기다리는 시간(초)
-LABEL="${LABEL:-0}"
-GAP="${GAP:-0.7}"                   # 같은 키 입력 사이가 이보다 벌어지면 "뗐다"로 봄 (macOS 키 반복 시작 지연보다 길어야 함)
+OUT="$(cd "$(dirname "$0")" && pwd)/csi_$(date +%Y%m%d_%H%M%S).csv"
+i="${DELAY:-3}"; while [ "$i" -gt 0 ]; do printf '\r%d초 뒤 시작 ' "$i" >&2; sleep 1; i=$((i - 1)); done   # 자세 잡을 시간 카운트다운
+printf '\r측정 시작      \a\n' >&2                    # 시작 알림음
+trap ':' INT                                           # Ctrl+C는 perl만 멈추고 아래 stty 복구까지 진행
+[ "$LABEL" = 1 ] && S="$(stty -g)" && stty -icanon -echo min 0 time 1   # 엔터 없이 키 바로 받기, 화면에 안 찍기
 
-if [ -z "$PORT" ]; then
-    echo "usage: $0 <serial-port> [seconds]" >&2
-    exit 1
-fi
-if [ ! -e "$PORT" ]; then
-    echo "[csi_log] 포트가 없음: $PORT   (ls /dev/cu.* 로 확인)" >&2
-    exit 1
-fi
+# 포트를 연 채로 보드레이트 설정(stty) → 같은 연결을 perl이 이어받음(exec)
+# perl은 시리얼(fd 0)과 키보드(/dev/tty)를 select로 같이 기다리다가 들어오는 대로 처리
+( stty "${BAUD:-921600}" raw -echo; exec perl -MTime::HiRes=time -e '
+    my ($dur, $out, $label, $gap) = @ARGV;
+    my $stop; $SIG{INT} = sub { $stop = 1 };
+    my $t0 = time;                                      # 받기 시작한 PC 시각 (측정 시간 재는 기준)
+    open my $o, ">", $out; select((select($o), $| = 1)[0]);   # 줄마다 바로 디스크에
+    print $o "seq,lost,ts_us,rssi,first_word_invalid,len,csi", ($label ? ",host_time,label" : ""), "\n";
+    my $tty; open $tty, "<", "/dev/tty" if $label;
 
-now() { perl -MTime::HiRes=time -e 'printf "%.3f\n", time'; }
+    my ($sb, $kb, $n, $ts0, $ta, @pend, @seg) = ("", "", 0);  # 시리얼 버퍼, 키 버퍼, 줄 수, ESP32 시각 기준, 첫 줄 도착 시각, 레이블 대기 줄, 키 구간 [키, 시작, 마지막 입력]
+    my $rep = 0.09;                                     # 키 반복 간격 (실제 간격으로 계속 갱신)
 
-# 0) 시작 전 대기: 실행하고 자세 잡거나 방에서 나갈 시간 (이 동안은 아무것도 안 받음, Ctrl+C로 취소 가능)
-i="$DELAY"
-while [ "$i" -gt 0 ]; do
-    printf '\r[csi_log] %d초 뒤 측정 시작...  ' "$i" >&2
-    sleep 1
-    i=$((i - 1))
-done
-printf '\r[csi_log] 측정 시작              \a\n' >&2   # \a: 터미널 알림음
+    # 시각 t의 레이블: t를 포함하는 구간(시작 ~ 마지막 입력 + 반복 간격)의 키
+    sub lab { my $t = shift; for (reverse @seg) { next if $_->[1] > $t; return $t <= $_->[2] + $rep ? $_->[0] : "none" } return "none" }
+    # t + gap 이 지난 줄은 구간이 더 안 바뀌니 확정해서 씀 (인자 1이면 전부)
+    sub flush { my $all = shift; while (@pend && ($all || time > $pend[0][0] + $gap + 0.1)) { my ($t, $r) = @{ shift @pend }; printf $o "%s,%.3f,%s\n", $r, $t, lab($t) } }
 
-RAW="$(mktemp "${TMPDIR:-/tmp}/csi_raw.XXXXXX")" || exit 1
-KEYS="$(mktemp "${TMPDIR:-/tmp}/csi_keys.XXXXXX")" || exit 1   # 키 입력 기록 (변환 끝나면 지움)
-READER=""
-TTYSAVE=""
-cleanup() {
-    [ -n "$READER" ] && kill "$READER" 2>/dev/null
-    [ -n "$TTYSAVE" ] && stty "$TTYSAVE" < /dev/tty 2>/dev/null   # 키 입력 모드 원래대로
-    rm -f "$RAW" "$KEYS"
-}
-trap cleanup EXIT
-trap ':' INT                                   # Ctrl+C는 대기만 끊고 아래 변환은 계속 진행
+    while (!$stop && time < $t0 + $dur) {
+        my $rin = ""; vec($rin, 0, 1) = 1; vec($rin, fileno $tty, 1) = 1 if $tty;
+        select(my $rout = $rin, undef, undef, 0.05);
 
-# 1) 받기: 포트를 연 채로 보드레이트 설정 후 원본을 그대로 파일에 씀 (다른 일은 안 함)
-( stty "$BAUD" raw -echo || exit 1; exec cat ) < "$PORT" > "$RAW" &
-READER=$!
-T0="$(now)"                                    # 받기 시작한 PC 시각 (레이블 시간 맞추는 기준)
-
-echo "[csi_log] $PORT @ $BAUD, ${DUR}s 저장 ..." >&2
-if [ "$LABEL" = 1 ]; then
-    echo "[csi_log] ← 누르고 있기 = 들숨,  → 누르고 있기 = 날숨,  안 누르기 = 무호흡" >&2
-    TTYSAVE="$(stty -g < /dev/tty)"
-    stty -icanon -echo min 0 time 1 < /dev/tty   # 엔터 없이 키 하나씩 바로 받기, 화면에 안 찍기
-    # 키 입력 기록: 화살표가 들어올 때마다 "PC시각,in|ex" 한 줄. DUR초 지나면 끝
-    perl -MTime::HiRes=time -e '
-        my ($dur, $out) = @ARGV; my $end = time + $dur;
-        open(my $tty, "<", "/dev/tty") or die; open(my $o, ">", $out) or die;
-        select((select($o), $| = 1)[0]); $| = 1;
-        print $o "host_time,key\n";
-        my ($buf, $last, $lt) = ("", "", 0);
-        while ((my $t = time) < $end) {
-            my $rin = ""; vec($rin, fileno($tty), 1) = 1;
-            if (select($rin, undef, undef, 0.05) > 0) {
-                sysread($tty, my $c, 64) or next; $buf .= $c;
-                while ($buf =~ s/\e[\[O]([CD])//) {          # → = ESC[C, ← = ESC[D
-                    my $k = $1 eq "D" ? "in" : "ex";
-                    printf $o "%.3f,%s\n", time, $k; ($last, $lt) = ($k, time);
-                }
-                $buf = "" if length($buf) > 16;              # 다른 키는 무시
+        if (vec($rout, 0, 1) && sysread STDIN, my $c, 65536) {
+            $sb .= $c;
+            while ($sb =~ s/^(.*?)\r?\n//) {
+                my ($h, $b) = $1 =~ /^CSI,((?:-?\d+,){6})\[(.*?) *\]$/ or next;    # h = "seq,lost,ts,rssi,fwi,len," 숫자 6개 딱 (반쪽 줄이 앞에 붙은 건 버림)
+                next unless $b =~ /^-?\d+( -?\d+)*$/ && split(/ /, $b) == (split /,/, $h)[5];   # 잘리거나 깨진 줄 버림
+                $n++;
+                if (!$label) { print $o "$h\"$b\"\n"; next }
+                my $ts = (split /,/, $h)[2]; $ts0 //= $ts; $ta //= time;              # 기준점 = 첫 정상 줄의 ESP32 시각과 실제 도착 시각
+                push @pend, [$ta + (($ts - $ts0) % 2**32) / 1e6, "$h\"$b\""];   # PC 시각 = 첫 줄 도착 + ESP32 경과 (uint32 한 바퀴 넘어가도 OK)
             }
-            my $st = ($last ne "" && time - $lt < 0.7) ? ($last eq "in" ? "들숨 <<" : "날숨 >>") : "무호흡  ";
-            printf STDERR "\r[csi_log] %4.0fs 남음   %s   ", $end - time, $st;
         }
-        print STDERR "\n";
-    ' "$DUR" "$KEYS"
-    stty "$TTYSAVE" < /dev/tty; TTYSAVE=""
-else
-    sleep "$DUR"
-fi
-kill "$READER" 2>/dev/null
-wait "$READER" 2>/dev/null
-READER=""
-printf '\a' >&2                                # 측정 끝 알림음
-echo "[csi_log] 받은 원본 $(wc -c < "$RAW" | tr -d ' ') bytes, CSV 변환 중" >&2
 
-# 2) 변환: 원본 파일을 한 번에 읽어서 CSV로
-# LC_ALL=C: 포트 열 때 들어오는 깨진 바이트(한글 로케일에서 awk가 에러 냄)를 그냥 바이트로 취급
-# LABEL=1이면 키 기록 파일을 먼저 읽어서 들숨/날숨 구간을 만들고, CSI 줄마다 그 시각의 레이블을 붙임
-if [ "$LABEL" = 1 ]; then KEYIN="$KEYS"; else KEYIN=/dev/null; fi
-LC_ALL=C awk -v out="$OUT" -v label="$LABEL" -v t0="$T0" -v gap="$GAP" -v kf="$KEYIN" '
-    FILENAME == kf {                                    # 첫 번째 파일 = 키 기록 (LABEL=0이면 /dev/null이라 비어 있음)
-        if (FNR > 1) { split($0, e, ","); ne++; et[ne] = e[1] + 0; ek[ne] = e[2] }
-        next
-    }
-    !built {                                            # CSI 읽기 전에 한 번: 키 기록 → 구간
-        built = 1
-        rep = 0; nr = 0                                 # 키 반복 간격 추정 (0.2초 미만 간격들의 평균)
-        for (i = 2; i <= ne; i++) if (ek[i] == ek[i-1] && et[i] - et[i-1] < 0.2) { rep += et[i] - et[i-1]; nr++ }
-        rep = nr ? rep / nr : 0.09
-        for (i = 1; i <= ne; i++) {
-            if (i == 1 || ek[i] != ek[i-1] || et[i] - et[i-1] > gap) { ns++; ss[ns] = et[i]; sk[ns] = ek[i] }
-            se[ns] = et[i] + rep                        # 구간 끝 = 마지막 키 입력 + 반복 간격
+        if ($tty && vec($rout, fileno $tty, 1) && sysread $tty, my $c, 64) {
+            $kb .= $c;
+            while ($kb =~ s/\e[\[O]([CD])//) {                                     # ← = ESC[D, → = ESC[C
+                my ($k, $t, $s) = ($1 eq "D" ? "in" : "ex", time, $seg[-1]);
+                if ($s && $s->[0] eq $k && $t - $s->[2] <= $gap) {                  # 같은 키가 gap 안에 또 옴 = 계속 누르는 중
+                    $rep = 0.9 * $rep + 0.1 * ($t - $s->[2]) if $t - $s->[2] < 0.2;
+                    $s->[2] = $t;
+                } else { push @seg, [$k, $t, $t] }                                  # 키 바뀜 or 끊겼다 다시 누름 = 새 구간
+            }
+            $kb = "" if length $kb > 16;                                            # 다른 키는 무시
         }
-        p = 1
-        hdr = "seq,lost,ts_us,rssi,first_word_invalid,len,csi"
-        print (label == 1 ? hdr ",host_time,label" : hdr) > out
+
+        flush(0) if $label;
+        my $s = $seg[-1];
+        printf STDERR "\r%4.0fs  %d줄  %s   ", $t0 + $dur - time, $n, !$label ? "" : $s && time - $s->[2] < $gap ? $s->[0] : "none";
     }
-    { sub(/\r$/, "") }
-    /^CSI,/ {
-        i = index($0, "[")
-        if (i == 0 || $0 !~ /\]$/) { bad++; next }      # 잘린 줄
-        head = substr($0, 5, i - 5)                     # "seq,lost,ts,rssi,fwi,len,"
-        body = substr($0, i + 1); sub(/ *\]$/, "", body)   # [ ] 사이 "v0 v1 v2 ..."
-        nf = split(head, h, ",")
-        if (nf < 6 || split(body, v, " ") != h[6] + 0) { bad++; next }   # 값 개수 불일치
-        for (j = 1; j <= h[6]; j++)                     # 숫자 아닌 값(예: 글자 빠져서 "-"만 남음) 섞이면 버림
-            if (v[j] !~ /^-?[0-9]+$/) { bad++; next }
-        if (label == 1) {
-            if (ts0 == "") ts0 = h[3]
-            ht = t0 + (h[3] - ts0) / 1000000            # 이 CSI의 PC 시각 = 받기 시작 시각 + receiver 시간 경과
-            while (p <= ns && se[p] < ht) p++
-            lb = (p <= ns && ss[p] <= ht) ? sk[p] : "none"
-            cnt[lb]++
-            print head "\"" body "\"," sprintf("%.3f", ht) "," lb > out
-        } else
-            print head "\"" body "\"" > out
-        n++
-        next
-    }
-    { print }                                           # 부팅 로그 등은 화면에만
-    END {
-        if (!built) print "seq,lost,ts_us,rssi,first_word_invalid,len,csi" > out   # CSI가 한 줄도 없을 때
-        printf "[csi_log] done: %d rows (%d broken skipped) -> %s\n", n + 0, bad + 0, out > "/dev/stderr"
-        if (label == 1) printf "[csi_log] label: in %d, ex %d, none %d rows (키 입력 %d개, 구간 %d개) -> %s\n", cnt["in"], cnt["ex"], cnt["none"], ne, ns, out > "/dev/stderr"
-    }
-' "$KEYIN" - < "$RAW"
+    my $s = $seg[-1]; $s->[2] = time if $s && time - $s->[2] < $gap;   # 끝날 때 gap 안이면 아직 누르는 중 (다음 반복 입력이 오기 전에 끝난 것)
+    flush(1) if $label;
+    print STDERR "\n$n rows -> $out\n";
+' "${2:-10}" "$OUT" "$LABEL" "${GAP:-0.7}" ) < "$1"
+
+[ -n "$S" ] && stty "$S"
+printf '\a' >&2                                        # 끝 알림음
