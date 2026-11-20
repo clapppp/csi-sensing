@@ -13,6 +13,11 @@
 #include "nvs_flash.h"
 
 #define CSI_CHANNEL 11           // sender와 같게
+// CSI 스케일 설정
+// CSI_MANU_SCALE 0: 자동 스케일 (패킷마다 스케일이 바뀌어서 진폭이 같이 흔들림)
+// CSI_MANU_SCALE 1: CSI_SHIFT 값으로 스케일 고정 (0~15, 클수록 값이 커짐. 너무 크면 ±127에서 잘림)
+#define CSI_MANU_SCALE 1
+#define CSI_SHIFT      3
 // sender 로그에 찍힌 MAC으로 바꿔 넣기
 static const uint8_t SENDER_MAC[6] = {0xc8, 0x85, 0x41, 0xe2, 0x98, 0xf0};
 static const char *TAG = "recv";
@@ -92,8 +97,8 @@ static void csi_init(void)
         .stbc_htltf2_en    = false,  // STBC 안 씀
         .ltf_merge_en      = false,  // L-LTF와 HT-LTF를 평균 내지 않고 따로 받음
         .channel_filter_en = false,  // 인접 서브캐리어 평활화 끔 → 원본값
-        .manu_scale        = false,  // 스케일 자동
-        .shift             = 0,
+        .manu_scale        = CSI_MANU_SCALE,  // 1이면 스케일 고정, 0이면 자동
+        .shift             = CSI_SHIFT,       // 고정일 때 쓸 스케일 (manu_scale 0이면 무시됨)
     };
     ESP_ERROR_CHECK(esp_wifi_set_csi_config(&c));
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(csi_cb, NULL));
@@ -118,6 +123,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_recv_cb)); // 수신은 peer 등록 없이 가능
     csi_init();
 
-    ESP_LOGI(TAG, "receiver ready, ch %d, free heap %u", CSI_CHANNEL, (unsigned)esp_get_free_heap_size());
+    ESP_LOGI(TAG, "receiver ready, ch %d, csi manu_scale %d shift %d, free heap %u",
+             CSI_CHANNEL, CSI_MANU_SCALE, CSI_SHIFT, (unsigned)esp_get_free_heap_size());
     // app_main은 여기서 return해도 됨. 콜백과 print_task가 계속 동작함
 }
