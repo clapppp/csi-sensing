@@ -22,7 +22,7 @@ main 에서 송신시작
 
 /* ===== 설정값 ===== */
 #define CSI_CHANNEL   11         // 사용할 WiFi 채널. receiver도 같은 값이어야 패킷을 받음
-#define SEND_HZ       50        // 1초에 보낼 패킷 수 (= CSI 샘플링 주파수)
+#define SEND_HZ       100       // 1초에 보낼 패킷 수 (= CSI 샘플링 주파수)
 
 static const char *TAG = "sender";   // 로그 앞에 붙는 태그 문자열
 static const uint8_t BCAST[6] = {0xff,0xff,0xff,0xff,0xff,0xff}; // 브로드캐스트 주소: 모든 기기가 수신 대상
